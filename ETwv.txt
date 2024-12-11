@@ -1,0 +1,296 @@
+var shp=ee.FeatureCollection(polygon)
+
+
+Map.centerObject(polygon);
+
+
+var startDate = ee.Date('2013-03-18')
+var endDate = ee.Date('2023-06-01')
+
+
+//LANDSAT
+var dataset4 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterBounds(polygon) 
+    .filterDate(startDate, endDate) 
+    
+  print(dataset4, 'dataset4');  
+  
+    var dataset5=dataset4.map(function(image){
+  return image.clip(polygon);
+});    
+ 
+var dataset6=dataset5.filterMetadata('CLOUD_COVER', 'less_than', 20) 
+    
+    
+// Applies scaling factors.
+function applyScaleFactors(image) {
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBands, null, true);
+}
+
+var dataset7 = dataset6.map(applyScaleFactors);
+print(dataset7, 'dataset7');
+
+ 
+
+var visualization = {
+  bands: ['SR_B4', 'SR_B3', 'SR_B2'],
+  min: 0.0,
+  max: 0.3,
+};
+
+
+
+//Map.addLayer(dataset5, visualization, 'True Color (432)');
+
+// add ndvi band function
+var addNDVI = function(image) {
+  var NDVI = image.expression(
+    '((NIR - RED) / (NIR + RED))', {
+       'RED': image.select('SR_B4'),
+       'NIR': image.select('SR_B5'),
+    }).rename('NDVI');
+  return image.addBands([NDVI]);
+};   
+
+var ndviCollection = dataset7.map(addNDVI);
+print(ndviCollection,'ndviCollection');
+
+
+// otros indices:
+var addRENDVI = function(Im) {
+    var mndwi = Im.normalizedDifference(['SR_B3', 'SR_B6']).rename('MNDWI');
+    var NDWI = Im.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+   
+  return Im.addBands(NDWI).addBands(mndwi)}; 
+  
+var final = ndviCollection.map(addRENDVI);
+print('dataset final',final);
+
+
+//Calculo Humedad
+var addH = function(imagen) {
+  var H = imagen.expression(
+  
+  '(1.843641523 -0.474648305*MNDWI+1.24*NDVI+  1.719617800 *NDWI -0.00477525828*TS)', { 
+  
+      
+       'MNDWI': imagen.select('MNDWI'),
+       'NDVI': imagen.select('NDVI'),
+       'NDWI': imagen.select('NDWI'),
+       'TS': imagen.select('ST_B10'),
+    }).rename('H');
+  return imagen.addBands(H);
+};   
+var Humedad = final.map(addH);
+print('dataset Humedad',Humedad);
+
+
+var Hmsatclip = Hmsat.clip(polygon);
+
+
+
+var addF = function(imagen) {
+  var F = imagen.expression(
+         
+   '(H*100)/(Hmsat)', {
+       'H': imagen.select('H'),
+       'Hmsat': Hmsatclip,
+    }).rename('F');
+  return imagen.addBands(F);
+};   
+var FinalF = Humedad.map(addF);
+print('FinalF',FinalF);
+
+
+ var Fimage= FinalF.select('F').toBands();
+ print(Fimage,'Fcollection')
+ var par_visF = {min: 0, max: 1, palette: ["0000FF","60a1e1","9ba1a1", "43c1c1","ADFF2F", "bfc143", "086213"]};
+ Map.addLayer(Fimage.select('LC08_225082_20141117_F'), par_visF, 'F');
+
+
+
+
+// ***** NOAA/CFSV2/FOR6H *****
+
+var datasetclip = ee.ImageCollection('NOAA/CFSV2/FOR6H')
+                 .filterDate(startDate,endDate);
+                 
+                 
+
+// create function to crop with table boundaries
+var table_bounds = function(image) {
+  // Crop by table extension
+  return image.clip(polygon);
+};
+var dataset = datasetclip.map(table_bounds);
+
+print(dataset.first(),'NOAAclip')
+
+//Genera una funcion para filtrar las imagenes de todo un dìa y promediar la ET para ese dìa 
+var numberOfDays = endDate.difference(startDate, 'days')
+print(numberOfDays);
+var day_mean = ee.List.sequence(0, numberOfDays.subtract(1)).map(function(n) { // .sequence: number of years from starting year to present
+  var start = ee.Date(startDate).advance(n,'day'); // Starting date
+  var end = start.advance(1, 'day'); // Step by each iteration
+
+  return dataset.filterDate(start, end)
+    .mean()
+       .set('system:time-start', start)
+       .set('system:time_start', start.millis());
+});
+
+
+var collection = ee.ImageCollection (day_mean)
+print('media diaria',collection);
+
+
+
+//buscando fechas landast
+
+// Get the timestamp and convert it to a date.
+
+
+var date = ee.Date(FinalF.first().get('system:time_start'));
+var date=date.format('YYYY-MM-dd');
+print(date,'date');
+date= ee.Date(date);
+
+
+
+
+// Filtro collección NOAA
+var filtra1 = collection.filter(ee.Filter.inList('system:time-start', 
+          ee.List([date])));
+          
+          print('filtra1',filtra1)
+
+// Lista con todas las fechas
+
+// set a date property to exactly 00:00 AM
+var FinalF = FinalF.map(function(image){
+  return image.set('simpleTime', ee.Date(image.date().format('YYYY-MM-dd')).millis());
+});
+
+print('FinalF',FinalF)
+
+
+var dates = FinalF.aggregate_array('simpleTime');
+dates = dates.map(function(x){return ee.Date(x)})
+
+print(dates)
+
+
+// Filtro collección NOAA
+var filtra = collection.filter(ee.Filter.inList('system:time-start',dates));
+          
+   
+print('Filtrado',filtra);
+
+
+// Unir collecciones
+
+//-------------------------------------------------------
+//Fusion de las dos collecciones de imagenes para crear el ETwv
+
+///Combine two image collections
+var mod1 = FinalF.select('F','H');
+var mod2 = filtra.select('Temperature_height_above_ground', 'Downward_Long-Wave_Radp_Flux_surface_6_Hour_Average', 'Downward_Short-Wave_Radiation_Flux_surface_6_Hour_Average', 'Upward_Long-Wave_Radp_Flux_surface_6_Hour_Average',
+  'Upward_Short-Wave_Radiation_Flux_surface_6_Hour_Average', 'Latent_heat_net_flux_surface_6_Hour_Average');
+
+print(mod1);
+print(mod2);
+
+var filter = ee.Filter.equals({
+  leftField: 'simpleTime',
+  rightField: 'system:time_start'
+});
+
+// Create the join.
+var simpleJoin = ee.Join.inner();
+
+// Inner join
+var innerJoin = ee.ImageCollection(simpleJoin.apply(mod1, mod2, filter));
+
+var joined = innerJoin.map(function(feature) {
+  return ee.Image.cat(feature.get('primary'), feature.get('secondary'));
+});
+
+print('Joined', joined);
+
+
+// Función ETw
+
+var ET = function(Ta,G,Roce,Rocs,RNoc,Role,Rols,RNol,RN,SM,SMsat,F,delta,ETwv) {
+  var wrap = function(Im) {
+    var Ta = Im.select('Temperature_height_above_ground').subtract(273);
+    var Roce=Im.select('Downward_Short-Wave_Radiation_Flux_surface_6_Hour_Average');
+    var Rocs=Im.select('Upward_Short-Wave_Radiation_Flux_surface_6_Hour_Average');
+    var RNoc =Roce.subtract(Rocs);
+    var Role= Im.select('Downward_Long-Wave_Radp_Flux_surface_6_Hour_Average');
+    var Rols=Im.select('Upward_Long-Wave_Radp_Flux_surface_6_Hour_Average');
+    var RNol =Role.subtract(Rols);
+    var RN = RNoc.add(RNol);
+    var G = RN.multiply(0.2);
+   // var SM =Im.select('Volumetric_Soil_Moisture_Content_depth_below_surface_layer_5_cm');
+   // var SMsat = image.divide(100);
+    var F=Im.select('F');
+    var delta  = Im.expression('(4098*(0.6108*exp((17.27*Ta)/(Ta+237.3))))/((Ta+237.3)**2)', {
+      'Ta': Im.select('Temperature_height_above_ground').subtract(273)});
+    var ETwv =((F.multiply(delta).multiply(1.26)).divide(((F.multiply(delta)).add(0.0670985))).multiply(RN.subtract(G))).multiply(0.038315).rename("ETwv");
+
+    return Im.addBands(ETwv).set('system:time_start',Im.get('system:time_start'));
+    }
+  return wrap
+}
+
+
+//aplica la funcion ETwv a la colección de imagenes:
+var datasetET= joined.map(ET('Ta','G','Roce','Rocs','Role','Rols','RNoc','RNol','RN','SM','SMsat','F','delta'));
+print(datasetET,'datasetET');
+
+
+
+// Función Time Series
+
+// Create a time series chart
+var tempTimeSeries = ui.Chart.image.seriesByRegion({
+  imageCollection: datasetET,
+  regions: polygon,
+  reducer: ee.Reducer.mean(),
+  band: 'ETwv',
+  scale: 30,
+  seriesProperty: 'label',
+  xProperty: 'system:time_start'
+});
+
+
+// Configure the time series chart
+tempTimeSeries.setOptions({
+  title: 'ETwv',
+  vAxis: {title: 'ETwv'},
+  lineWidth: 1,
+  pointSize: 2,
+   series: {
+    0: {color: '009000'}
+
+  }
+});
+
+// Print the time series chart
+print(tempTimeSeries);
+
+
+
+
+
+
+
+
+
+
+
+
+
